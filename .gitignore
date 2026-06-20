@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+
+# OMC runtime state (oh-my-claudecode session/agent data)
+.omc/
+
+# Planning artifacts
+PLAN.md
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*

@@ -1,0 +1,100 @@
+{
+  "name": "codium-java-navigator",
+  "displayName": "Java Navigator",
+  "description": "Enhanced navigation and visualization for Java projects in VSCode",
+  "version": "0.0.1",
+  "publisher": "codium",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.64.0"
+  },
+  "categories": ["Programming Languages", "Other"],
+  "activationEvents": ["onLanguage:java", "onView:javaNavigator.referencesView"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "javaNavigator.peekFiltered",
+        "title": "Peek References (Filtered)",
+        "category": "Java Navigator"
+      },
+      {
+        "command": "javaNavigator.findEventHandlers",
+        "title": "Find Event Handlers",
+        "category": "Java Navigator"
+      },
+      {
+        "command": "javaNavigator.openGraph",
+        "title": "Open Project Graph",
+        "category": "Java Navigator"
+      },
+      {
+        "command": "javaNavigator.focusGraph",
+        "title": "Focus Graph on Current File",
+        "category": "Java Navigator"
+      }
+    ],
+    "views": {
+      "panel": [
+        {
+          "type": "webview",
+          "id": "javaNavigator.referencesView",
+          "name": "Java References"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "javaNavigator.peekFiltered",
+        "key": "shift+alt+f12",
+        "mac": "shift+alt+f12",
+        "when": "editorLangId == java && editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Java Navigator",
+      "properties": {
+        "javaNavigator.testSourceRoots": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["src/test/", "src/it/", "src/integration-test/"],
+          "description": "Path segments identifying test source roots. References whose file path contains any of these are excluded from filtered peek."
+        },
+        "javaNavigator.testFilePatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["Test.java", "Tests.java", "TestCase.java", "Spec.java"],
+          "description": "Filename suffixes (fallback) for identifying test files not under a configured test source root."
+        },
+        "javaNavigator.filterImports": {
+          "type": "boolean",
+          "default": true,
+          "description": "Exclude import statement references from filtered peek by default."
+        },
+        "javaNavigator.listenerAnnotations": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["@EventListener", "@TransactionalEventListener", "@Subscribe"],
+          "description": "Annotation names used to discover event handler methods."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js --production",
+    "dev": "node esbuild.js --watch",
+    "compile": "tsc --noEmit",
+    "test": "node --require ts-node/register --test src/commands/__tests__/**/*.test.ts",
+    "cucumber": "cucumber-js"
+  },
+  "devDependencies": {
+    "@cucumber/cucumber": "^10.3.0",
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.63.0",
+    "@vscode/test-electron": "^2.3.0",
+    "esbuild": "^0.20.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.3.0"
+  }
+}
