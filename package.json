@@ -9,7 +9,7 @@
     "vscode": "^1.64.0"
   },
   "categories": ["Programming Languages", "Other"],
-  "activationEvents": ["onLanguage:java", "onView:javaNavigator.referencesView"],
+  "activationEvents": ["onLanguage:java", "onView:javaNavigator.referencesView", "onView:javaNavigator.graphView"],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
@@ -40,6 +40,11 @@
           "type": "webview",
           "id": "javaNavigator.referencesView",
           "name": "Java References"
+        },
+        {
+          "type": "webview",
+          "id": "javaNavigator.graphView",
+          "name": "Java Project Graph"
         }
       ]
     },

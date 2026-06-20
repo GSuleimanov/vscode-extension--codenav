@@ -2,12 +2,18 @@ import * as vscode from 'vscode';
 import { ReferencesSideView, PanelInput } from '../views/referencesSideView';
 import { expandViaTypeDefinitions, TypeExpansionExecutor } from './expandViaType';
 
-export function createPeekFilteredCommand(view: ReferencesSideView) {
+export function createPeekFilteredCommand(
+  view: ReferencesSideView,
+  onFocusClass?: (uri: vscode.Uri) => void
+) {
   return async () => {
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.document.languageId !== 'java') { return; }
 
     const { document, selection } = editor;
+
+    // Center the project graph (if open) on the class being peeked.
+    onFocusClass?.(document.uri);
     const position = selection.active;
     const wordRange = document.getWordRangeAtPosition(position);
     const symbolName = wordRange ? document.getText(wordRange) : 'symbol';
