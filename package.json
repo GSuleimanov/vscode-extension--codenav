@@ -1,6 +1,6 @@
 {
   "name": "vscode-codenav-extension",
-  "displayName": "Codenav",
+  "displayName": "Codenav for Java",
   "description": "Enhanced navigation and visualization for Java projects in VSCode",
   "version": "0.1.0",
   "publisher": "gsuleimanov",
