@@ -2,7 +2,7 @@
   "name": "vscode-codenav-extension",
   "displayName": "Codenav for Java",
   "description": "Enhanced navigation and visualization for Java projects in VSCode",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "gsuleimanov",
   "license": "Apache-2.0",
   "icon": "images/codenav-logo.png",
@@ -125,6 +125,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run build",
+    "publish:all": "bash scripts/publish.sh",
     "build": "node esbuild.js --production",
     "dev": "node esbuild.js --watch",
     "compile": "tsc --noEmit",
