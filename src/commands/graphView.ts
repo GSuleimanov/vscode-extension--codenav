@@ -245,7 +245,7 @@ export class GraphSideView {
     let hoverNode = null;
     let dpr = 1, viewW = 0, viewH = 0;
 
-    const X_GAP = 175, LEVEL_Y = 210, MIN_DIST = 82, NODE_R = 16;
+    const X_GAP = 175, LEVEL_Y = 210, MIN_DIST = 96, NODE_R = 16;
 
     // ── restore saved map ──────────────────────────────────────────────────────
     (function restore() {
@@ -344,11 +344,59 @@ export class GraphSideView {
       if (!edgeKeys.has(k)) { edgeKeys.add(k); edges.push(e); }
     }
 
+    // ── force layout ─────────────────────────────────────────────────────────
+    // A light force simulation keeps elements from overlapping. Hard overlap
+    // resolution (relaxOverlaps) guarantees every pair stays MIN_DIST apart, while
+    // soft directional springs pull each edge's target one level below its source
+    // (callers above → centre → dependencies below). Cooling settles the layout,
+    // then a final relax pass guarantees no residual overlap before saving.
+    let sim = { active: false, alpha: 0 };
+    function kickSim(strength) {
+      sim.alpha = Math.min(1, Math.max(sim.alpha, strength == null ? 1 : strength));
+      if (!sim.active) { sim.active = true; requestAnimationFrame(simStep); }
+    }
+    function relaxOverlaps() {
+      const nodes = [...nodeMap.values()];
+      for (let iter = 0; iter < 2; iter++) {
+        for (let i = 0; i < nodes.length; i++) {
+          for (let j = i + 1; j < nodes.length; j++) {
+            const a = nodes[i], b = nodes[j];
+            let dx = b.x - a.x, dy = b.y - a.y;
+            let d = Math.hypot(dx, dy);
+            if (d === 0) { dx = (Math.random() - 0.5) * 2; dy = (Math.random() - 0.5) * 2; d = Math.hypot(dx, dy) || 0.001; }
+            if (d < MIN_DIST) {
+              const push = (MIN_DIST - d) / 2;
+              const ux = dx / d, uy = dy / d;
+              if (a !== dragging) { a.x -= ux * push; a.y -= uy * push; }
+              if (b !== dragging) { b.x += ux * push; b.y += uy * push; }
+            }
+          }
+        }
+      }
+    }
+    function simStep() {
+      if (sim.alpha < 0.03) { relaxOverlaps(); sim.active = false; draw(); scheduleSave(); return; }
+      // Soft directional springs: every edge's 'to' node sits LEVEL_Y below 'from',
+      // and is pulled toward horizontal alignment with it.
+      for (const e of edges) {
+        const a = nodeMap.get(e.from), b = nodeMap.get(e.to);
+        if (!a || !b) { continue; }
+        const vy = ((b.y - a.y) - LEVEL_Y) * 0.5 * sim.alpha;
+        if (a !== dragging) { a.y += vy; }
+        if (b !== dragging) { b.y -= vy; }
+        const hx = (b.x - a.x) * 0.04 * sim.alpha;
+        if (a !== dragging) { a.x += hx; }
+        if (b !== dragging) { b.x -= hx; }
+      }
+      relaxOverlaps();
+      sim.alpha *= 0.92;
+      draw();
+      requestAnimationFrame(simStep);
+    }
+
     // ── camera animation ───────────────────────────────────────────────────────
     let anim = null;
     function animateToNode(n) {
-      const tx = viewW / 2 - n.x * view.scale;
-      const ty = viewH / 2 - n.y * view.scale;
       const sx = view.x, sy = view.y;
       const start = performance.now(), dur = 240;
       anim = start;
@@ -356,6 +404,10 @@ export class GraphSideView {
         if (anim !== start) { return; }      // superseded
         const t = Math.min(1, (now - start) / dur);
         const e = 1 - Math.pow(1 - t, 3);    // easeOutCubic
+        // Read the node's live position each frame — the force sim may still be
+        // nudging it while the camera glides in.
+        const tx = viewW / 2 - n.x * view.scale;
+        const ty = viewH / 2 - n.y * view.scale;
         view.x = sx + (tx - sx) * e;
         view.y = sy + (ty - sy) * e;
         draw();
@@ -382,7 +434,9 @@ export class GraphSideView {
       const isActive = n.id === activeId;
       const isHover  = n === hoverNode;
       const r = NODE_R + (isHover ? 3 : 0);
-      const baseAlpha = n.tier === 'inactive' ? 0.35 : 1.0;
+      // Inactive nodes sit at 20% opacity; hovering any node floors it at 80% visible.
+      const tierAlpha = n.tier === 'inactive' ? 0.20 : 1.0;
+      const baseAlpha = isHover ? Math.max(tierAlpha, 0.80) : tierAlpha;
       ctx.globalAlpha = baseAlpha;
 
       if (isHover) {
@@ -405,10 +459,10 @@ export class GraphSideView {
       }
 
       if (!isHover) {
-        // Label angled 35° to reduce horizontal overlap between neighbours.
+        // Label angled 15° to reduce horizontal overlap between neighbours.
         ctx.save();
         ctx.translate(s.x, s.y - r - 6);
-        ctx.rotate(35 * Math.PI / 180);
+        ctx.rotate(15 * Math.PI / 180);
         ctx.fillStyle = T.text;
         ctx.font = (isActive ? 'bold ' : '') + '11px var(--vscode-font-family)';
         ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
@@ -599,6 +653,8 @@ export class GraphSideView {
 
         const dots = { center: '·', dependencies: '··', callers: '···', siblings: '····' };
         updateStatus(dots[msg.stage] || '');
+        // New geometry arrived — let the force layout settle it without overlap.
+        kickSim(msg.stage === 'center' ? 0.5 : 1);
         draw();
         scheduleSave();
         return;
