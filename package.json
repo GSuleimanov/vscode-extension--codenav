@@ -23,8 +23,7 @@
   ],
   "activationEvents": [
     "onLanguage:java",
-    "onView:codenav.referencesView",
-    "onView:codenav.graphView"
+    "onView:codenav.referencesView"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -47,12 +46,6 @@
           "id": "codenav.referencesView",
           "name": "Codenav References",
           "icon": "$(list-tree)"
-        },
-        {
-          "type": "webview",
-          "id": "codenav.graphView",
-          "name": "Codenav Project Graph",
-          "icon": "$(type-hierarchy)"
         }
       ]
     },

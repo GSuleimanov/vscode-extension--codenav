@@ -5,87 +5,112 @@ import { providerForUri } from '../graph/lang/registry';
 // Side-effect import: registers language providers (java, python).
 import '../graph/lang';
 
-export class GraphSideView implements vscode.WebviewViewProvider {
+export class GraphSideView {
   static readonly viewId = 'codenav.graphView';
 
-  private view?: vscode.WebviewView;
+  private panel?: vscode.WebviewPanel;
   private cancelCurrent?: () => void;
-  private editorListenerSet = false;
+  private javaReady = false;
 
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  constructor(private readonly context: vscode.ExtensionContext) {
+    // Track active editor globally so graph updates whenever the user navigates,
+    // regardless of which panel has focus.
+    context.subscriptions.push(
+      vscode.window.onDidChangeActiveTextEditor((editor) => {
+        if (!this.panel?.visible) { return; }
+        const uri = editor?.document.uri;
+        if (this.javaReady && uri && providerForUri(uri.toString())) {
+          void this.loadFocusedGraph(uri);
+        } else if (this.panel) {
+          this.panel.webview.postMessage({ command: 'graphIdle' });
+        }
+      })
+    );
+  }
 
-  resolveWebviewView(webviewView: vscode.WebviewView): void {
-    this.view = webviewView;
-    webviewView.webview.options = { enableScripts: true };
-    webviewView.webview.html = this.getHtml();
+  /** Open (or focus) the graph editor panel. */
+  reveal(): void {
+    this.ensurePanel();
+  }
 
-    webviewView.webview.onDidReceiveMessage(async (msg) => {
+  /** Called from extension.ts once the Java language server is ready. */
+  setJavaReady(ready: boolean): void {
+    this.javaReady = ready;
+    if (!this.panel) { return; }
+    this.panel.webview.postMessage({ command: 'javaReady', ready });
+    if (ready) {
+      const uri = vscode.window.activeTextEditor?.document.uri;
+      if (uri && providerForUri(uri.toString())) { void this.loadFocusedGraph(uri); }
+    }
+  }
+
+  /** Called by filteredPeek when a symbol is peeked — re-centres on that file. */
+  focusUri(uriStr: string): void {
+    if (!providerForUri(uriStr)) { return; }
+    void this.loadFocusedGraph(vscode.Uri.parse(uriStr));
+  }
+
+  private ensurePanel(): vscode.WebviewPanel {
+    if (this.panel) {
+      this.panel.reveal(vscode.ViewColumn.Beside, true);
+      return this.panel;
+    }
+
+    const panel = vscode.window.createWebviewPanel(
+      GraphSideView.viewId,
+      'Codenav Graph',
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+      { enableScripts: true, retainContextWhenHidden: true }
+    );
+    this.panel = panel;
+    panel.webview.html = this.getHtml();
+
+    panel.webview.onDidReceiveMessage(async (msg) => {
       if (msg.command === 'navigate' && msg.uri) {
         const doc = await vscode.workspace.openTextDocument(vscode.Uri.parse(msg.uri));
         await vscode.window.showTextDocument(doc, {
           viewColumn: vscode.ViewColumn.One,
           selection: new vscode.Range(msg.line ?? 0, 0, msg.line ?? 0, 0),
+          preserveFocus: false,
         });
       } else if (msg.command === 'ready') {
+        // Webview has initialised — sync Java readiness state immediately.
+        panel.webview.postMessage({ command: 'javaReady', ready: this.javaReady });
+        if (this.javaReady) {
+          const uri = vscode.window.activeTextEditor?.document.uri;
+          if (uri && providerForUri(uri.toString())) { void this.loadFocusedGraph(uri); }
+        }
+      }
+    }, undefined, this.context.subscriptions);
+
+    panel.onDidChangeViewState(({ webviewPanel }) => {
+      if (webviewPanel.visible && this.javaReady) {
         const uri = vscode.window.activeTextEditor?.document.uri;
         if (uri && providerForUri(uri.toString())) { void this.loadFocusedGraph(uri); }
       }
     }, undefined, this.context.subscriptions);
 
-    webviewView.onDidChangeVisibility(() => {
-      if (webviewView.visible) {
-        const uri = vscode.window.activeTextEditor?.document.uri;
-        if (uri && providerForUri(uri.toString())) { void this.loadFocusedGraph(uri); }
-      }
+    panel.onDidDispose(() => {
+      this.cancelCurrent?.();
+      this.panel = undefined;
     }, undefined, this.context.subscriptions);
 
-    if (!this.editorListenerSet) {
-      this.editorListenerSet = true;
-      this.context.subscriptions.push(
-        vscode.window.onDidChangeActiveTextEditor((editor) => {
-          const uri = editor?.document.uri;
-          if (uri && providerForUri(uri.toString())) {
-            void this.loadFocusedGraph(uri);
-          } else {
-            this.view?.webview.postMessage({ command: 'graphIdle' });
-          }
-        })
-      );
-    }
-  }
-
-  reveal(): void {
-    if (this.view) {
-      this.view.show?.(true);
-    } else {
-      void vscode.commands.executeCommand(`${GraphSideView.viewId}.focus`);
-    }
-  }
-
-  revealAndFocus(): void {
-    this.reveal();
-    const uri = vscode.window.activeTextEditor?.document.uri;
-    if (uri && providerForUri(uri.toString())) { void this.loadFocusedGraph(uri); }
-  }
-
-  /** Called by filteredPeek when a symbol is peeked — re-centres on that file. */
-  focusUri(uriStr: string): void {
-    const uri = vscode.Uri.parse(uriStr);
-    if (providerForUri(uriStr)) { void this.loadFocusedGraph(uri); }
+    return panel;
   }
 
   private async loadFocusedGraph(uri: vscode.Uri): Promise<void> {
+    if (!this.panel) { return; }
     this.cancelCurrent?.();
     let cancelled = false;
     this.cancelCurrent = () => { cancelled = true; };
 
-    this.view?.webview.postMessage({ command: 'graphReset', name: uri.path.split('/').pop() });
+    this.panel.webview.postMessage({ command: 'graphReset', name: uri.path.split('/').pop() });
 
     await buildFocusedGraph(
       uri,
       (update) => {
         if (!cancelled) {
-          this.view?.webview.postMessage({ command: 'graphStage', ...update });
+          this.panel?.webview.postMessage({ command: 'graphStage', ...update });
         }
       },
       () => cancelled
@@ -124,9 +149,15 @@ export class GraphSideView implements vscode.WebviewViewProvider {
     #status { padding: 4px 12px; font-size: 11px; color: var(--vscode-descriptionForeground);
               border-top: 1px solid var(--vscode-panel-border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-                   flex-direction: column; gap: 10px; opacity: .45; pointer-events: none; }
+                   flex-direction: column; gap: 10px; opacity: .55; pointer-events: none; }
     #placeholder svg { opacity: .6; }
     #placeholder p { margin: 0; font-size: 13px; }
+
+    /* Java-loading progress bar */
+    .loading-bar { width: 120px; height: 2px; background: var(--vscode-panel-border); border-radius: 1px; overflow: hidden; }
+    .loading-bar i { display: block; width: 40%; height: 100%; background: var(--vscode-progressBar-background, #0e639c);
+                     animation: slide 1.5s infinite ease-in-out; border-radius: 1px; }
+    @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(350%); } }
   </style>
 </head>
 <body>
@@ -138,7 +169,8 @@ export class GraphSideView implements vscode.WebviewViewProvider {
         <line x1="12" y1="15" x2="12" y2="21"/><line x1="3" y1="12" x2="9" y2="12"/>
         <line x1="15" y1="12" x2="21" y2="12"/>
       </svg>
-      <p>Open a Java class to explore its graph</p>
+      <p id="placeholderMsg">Open a Java class to explore its graph</p>
+      <div id="loadingBar" class="loading-bar" style="display:none"><i></i></div>
     </div>
     <div id="floatBtns">
       <button id="btnTraverse" class="gbtn off" title="Show one extra level of callers and dependencies (coming soon)" disabled>Traverse</button>
@@ -150,21 +182,20 @@ export class GraphSideView implements vscode.WebviewViewProvider {
     const vscode = acquireVsCodeApi();
     const canvas  = document.getElementById('canvas');
     const ctx     = canvas.getContext('2d');
-    const statusEl      = document.getElementById('status');
-    const placeholderEl = document.getElementById('placeholder');
-    const placeholderMsg = placeholderEl.querySelector('p');
+    const statusEl       = document.getElementById('status');
+    const placeholderEl  = document.getElementById('placeholder');
+    const placeholderMsg = document.getElementById('placeholderMsg');
+    const loadingBarEl   = document.getElementById('loadingBar');
 
     // ── state ─────────────────────────────────────────────────────────────────
-    // Nodes accumulate across stages; each node gets x/y from layoutNodes().
     let nodeMap = new Map();   // id → { ...FocusedGraphNode, x, y }
-    let edges   = [];          // FocusedGraphEdge[]
+    let edges   = [];
     let centerNodeId = null;
     let view    = { x: 0, y: 0, scale: 1 };
     let hoverNode = null;
     let dpr = 1, viewW = 0, viewH = 0;
 
     // ── layout ────────────────────────────────────────────────────────────────
-    // Mirrors src/graph/view/graphLayout.ts (pure, no build step needed for webview).
     const ROW_Y  = { caller: -240, sibling: 0, center: 0, dependency: 240 };
     const X_GAP  = 170;
 
@@ -251,12 +282,6 @@ export class GraphSideView implements vscode.WebviewViewProvider {
       view.y = viewH/2 - (mnY+mxY)/2 * view.scale;
     }
 
-    function centreOnNode(n) {
-      view.x = viewW/2 - n.x * view.scale;
-      view.y = viewH/2 - n.y * view.scale;
-      draw();
-    }
-
     // ── drawing helpers ───────────────────────────────────────────────────────
     const NODE_R = 16;
     function toScreen(n) { return { x: n.x*view.scale+view.x, y: n.y*view.scale+view.y }; }
@@ -291,14 +316,20 @@ export class GraphSideView implements vscode.WebviewViewProvider {
         ctx.fillText(glyph, s.x, s.y);
       }
 
-      // Label (always shown; dimmed for siblings)
-      ctx.fillStyle = T.text;
-      ctx.font = (isCenter ? 'bold ' : '') + '11px var(--vscode-font-family)';
-      ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-      ctx.globalAlpha = isSibling ? 0.35 : 1;
-      ctx.fillText(n.name, s.x, s.y - r - 5);
+      // Label — angled 35°, hidden when hovering (tooltip replaces it)
+      if (!isHover) {
+        ctx.save();
+        ctx.translate(s.x, s.y - r - 6);
+        ctx.rotate(35 * Math.PI / 180);
+        ctx.fillStyle = T.text;
+        ctx.font = (isCenter ? 'bold ' : '') + '11px var(--vscode-font-family)';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+        ctx.globalAlpha = isSibling ? 0.35 : 1;
+        ctx.fillText(n.name, 0, 0);
+        ctx.restore();
+      }
 
-      // Hover tooltip
+      // Hover tooltip (replaces the label)
       if (isHover) {
         ctx.globalAlpha = 1;
         ctx.font = 'bold 12px var(--vscode-font-family)';
@@ -318,15 +349,14 @@ export class GraphSideView implements vscode.WebviewViewProvider {
 
     function glyphFor(n) {
       const t = n.tags || [];
-      if (t.includes('test'))       { return 'T'; }
-      if (t.includes('controller')) { return 'C'; }
+      if (t.includes('test'))        { return 'T'; }
+      if (t.includes('controller'))  { return 'C'; }
       if (t.includes('eventHandler')){ return 'H'; }
-      if (t.includes('service'))    { return 'S'; }
-      if (t.includes('repository')) { return 'R'; }
+      if (t.includes('service'))     { return 'S'; }
+      if (t.includes('repository'))  { return 'R'; }
       return null;
     }
 
-    // Deterministic per-edge bow (avoids overlapping bidirectional arrows).
     function edgeSeed(from, to) {
       let h = 5381; const s = from+'\0'+to;
       for (let i=0;i<s.length;i++){h=((h<<5)+h+s.charCodeAt(i))>>>0;}
@@ -366,7 +396,6 @@ export class GraphSideView implements vscode.WebviewViewProvider {
       ctx.globalAlpha = 1;
     }
 
-    // Row labels (subtle, left-aligned)
     function drawRowLabels() {
       if (!nodeMap.size) { return; }
       const hasCallers = [...nodeMap.values()].some(n => n.role === 'caller');
@@ -385,7 +414,6 @@ export class GraphSideView implements vscode.WebviewViewProvider {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, viewW, viewH);
       edges.forEach(drawEdge);
-      // Draw siblings first so center paints on top.
       const ordered = [...nodeMap.values()].sort((a,b) => (a.role==='center'?1:0)-(b.role==='center'?1:0));
       const withHover = hoverNode ? [...ordered.filter(n=>n!==hoverNode), hoverNode] : ordered;
       withHover.forEach(drawNode);
@@ -394,8 +422,23 @@ export class GraphSideView implements vscode.WebviewViewProvider {
 
     // ── message handling ──────────────────────────────────────────────────────
     window.addEventListener('message', ({ data: msg }) => {
+      if (msg.command === 'javaReady') {
+        if (!msg.ready) {
+          placeholderEl.style.display = 'flex';
+          placeholderMsg.textContent  = 'Java language server starting…';
+          loadingBarEl.style.display  = 'block';
+        } else {
+          loadingBarEl.style.display  = 'none';
+          if (nodeMap.size === 0) {
+            placeholderMsg.textContent = 'Open a Java class to explore its graph';
+          }
+        }
+        return;
+      }
+
       if (msg.command === 'graphReset') {
         nodeMap.clear(); edges = []; centerNodeId = null; hoverNode = null;
+        loadingBarEl.style.display  = 'none';
         placeholderEl.style.display = 'flex';
         placeholderMsg.textContent  = 'Building graph for ' + msg.name + '…';
         statusEl.textContent = '';
@@ -427,12 +470,9 @@ export class GraphSideView implements vscode.WebviewViewProvider {
 
         layoutNodes();
 
-        if (isFirst || msg.stage === 'center') {
-          fitView();
-        }
+        if (isFirst || msg.stage === 'center') { fitView(); }
 
-        const nCount = nodeMap.size;
-        const eCount = edges.length;
+        const nCount = nodeMap.size, eCount = edges.length;
         const stages = { center:'·', dependencies:'··', callers:'···', siblings:'····' };
         statusEl.textContent = nCount + ' classes · ' + eCount + ' relationships' + (stages[msg.stage] || '');
 
