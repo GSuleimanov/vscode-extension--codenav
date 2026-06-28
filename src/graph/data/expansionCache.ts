@@ -75,5 +75,10 @@ export function setExpansion(uri: string, entry: CachedExpansion): void {
   }
 }
 
+// Non-mutating presence check (doesn't touch LRU recency). A node is cached only once
+// its language providers were ready, so this doubles as a "was the build complete?"
+// signal for the host's cold-start retry.
+export function hasExpansion(uri: string): boolean { return store.has(uri); }
+
 export function invalidateExpansion(uri: string): void { store.delete(uri); }
 export function clearExpansionCache(): void { store.clear(); }

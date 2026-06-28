@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { buildFocusedGraph, expandDependencies } from '../graph/data/focusedGraphBuilder';
 import { buildTieredGraph } from '../graph/data/tieredGraphBuilder';
 import { FocusedGraphNode, FocusedGraphEdge } from '../graph/data/focusedGraphTypes';
-import { bumpEpoch, invalidateExpansion } from '../graph/data/expansionCache';
+import { bumpEpoch, invalidateExpansion, hasExpansion } from '../graph/data/expansionCache';
 import { providerForUri } from '../graph/lang/registry';
 
 // Side-effect import: registers all language providers.
@@ -64,10 +64,6 @@ export class GraphSideView {
   reveal(): void {
     const panel = this.ensurePanel();
     panel.reveal(vscode.ViewColumn.Beside, true);
-    // Play the short intro animation each time the editor is opened. (On the very
-    // first open the webview also plays it on load, in case this message races the
-    // webview's initial script.)
-    panel.webview.postMessage({ command: 'playIntro' });
   }
 
   /** Called from extension.ts once the language providers are ready. */
@@ -160,7 +156,7 @@ export class GraphSideView {
    * and `postMessage` as the update sink, and owns cancellation. Each message carries
    * a seqId so the webview can discard stages from a superseded build.
    */
-  private async runTieredBuild(centerUri: vscode.Uri): Promise<void> {
+  private async runTieredBuild(centerUri: vscode.Uri, attempt = 0): Promise<void> {
     if (!this.panel) { return; }
     this.cancelCurrent?.();
     let cancelled = false;
@@ -191,6 +187,28 @@ export class GraphSideView {
       deps: n.deps,
     }));
     this.panel.webview.postMessage({ command: 'reconcile', seqId, nodes });
+
+    // Self-heal a premature build. Right after activation the file's language providers
+    // may still be warming up (the symbol index for deps, the reference provider for
+    // callers), so the neighbourhood resolves empty. The builder decides readiness by
+    // comparing what tree-sitter parsed locally (the class's declared dependencies)
+    // against what actually resolved, and only caches once that and the callers are
+    // genuinely ready — so a selected file still absent from the cache means tree-sitter
+    // saw something the providers haven't caught up to yet. Poll every 2s until it
+    // resolves (cold-starting a server can take a while), then stop. A real isolated
+    // class caches immediately and never polls; superseding it with a newer build does
+    // too (the seqId guard). Capped so a genuinely unresolvable file can't poll forever.
+    const incomplete = !model.selectedId || !hasExpansion(centerUri.toString());
+    if (incomplete && attempt < 20 && seqId === this.buildSeq) {
+      // Still waiting on the language server — keep the loading screen up while we poll.
+      this.panel.webview.postMessage({ command: 'buildLoading', loading: true });
+      setTimeout(() => {
+        if (seqId === this.buildSeq && this.panel) { void this.runTieredBuild(centerUri, attempt + 1); }
+      }, 2000);
+    } else {
+      // Got the result (or gave up) — dismiss the loading screen and reveal the graph.
+      this.panel.webview.postMessage({ command: 'buildLoading', loading: false });
+    }
   }
 
   /**
@@ -338,33 +356,13 @@ export class GraphSideView {
       return 'Loading…';
     }
 
-    // ── animated loading / intro screen ─────────────────────────────────────────
-    // One element does double duty: it's the loading screen (shown while the graph
-    // is empty or building) and the open-the-editor intro (shown for ~2s). When
-    // "locked" it stays until explicitly hidden; otherwise it auto-hides after 2s.
-    let introTimer = null, introLocked = false;
+    // ── loading screen ──────────────────────────────────────────────────────────
+    // The animated screen is shown only while we're genuinely waiting on the language
+    // server (or when no file is open yet). It stays up until explicitly hidden — there
+    // is no timed "flourish": once a graph can be drawn, the canvas shows it directly.
     function setIntroMsg(t) { if (introMsg) { introMsg.textContent = t; } }
-    // hold: true → stay until hideIntro(); a number → auto-hide after that many ms;
-    // anything else → default 2000ms. The graph keeps building underneath, then the
-    // screen fades out to reveal it.
-    function showIntro(hold) {
-      if (!introEl) { return; }
-      introEl.classList.add('show');
-      introLocked = hold === true;
-      if (introTimer) { clearTimeout(introTimer); introTimer = null; }
-      if (hold !== true) {
-        const ms = typeof hold === 'number' ? hold : 2000;
-        introTimer = setTimeout(() => { introEl.classList.remove('show'); introLocked = false; introTimer = null; }, ms);
-      }
-    }
-    function hideIntro() {
-      introLocked = false;
-      if (introTimer) { clearTimeout(introTimer); introTimer = null; }
-      if (introEl) { introEl.classList.remove('show'); }
-    }
-    // Open-the-editor flourish — only when a graph already exists; an empty graph is
-    // driven by the loading flow (LSP-starting → preparing) instead.
-    function playIntro() { if (nodeMap.size) { showIntro(2000); } }
+    function showIntro() { if (introEl) { introEl.classList.add('show'); } }
+    function hideIntro() { if (introEl) { introEl.classList.remove('show'); } }
 
     // ── graph map (single source of truth) ──────────────────────────────────────
     // nodeMap: id -> { id,name,uri,line,kind,tags, x,y, expanded }
@@ -388,6 +386,7 @@ export class GraphSideView {
     let dpr = 1, viewW = 0, viewH = 0;
     let lastFileUri = null;           // last editor shown (persisted) — Reset returns here
     let building = false;             // a build is streaming; layout is deferred until it ends
+    let buildLoadingLock = false;     // host is polling the LSP — keep the loading screen up
     let suppressActiveFor = null;     // uri we just opened ourselves — ignore its echo
     let suppressTimer = null;
 
@@ -462,7 +461,14 @@ export class GraphSideView {
     }
     let T = {};
     function refreshTheme() {
+      // Resolve the UI font stack to a concrete family — canvas ctx.font can't take a
+      // CSS var() — and the editor's own font size, so node labels match editor text.
+      // The hover label uses the same family two points larger and bold.
+      const editorFontSize = parseFloat(cssVar('--vscode-editor-font-size', '13')) || 13;
       T = {
+        font:      cssVar('--vscode-font-family', 'sans-serif'),
+        labelSize: editorFontSize + 'px',
+        hoverSize: (editorFontSize + 2) + 'px',
         fill:      cssVar('--vscode-button-background', '#0e639c'),
         fillFocus: cssVar('--vscode-charts-green', '#4ec9b0'),
         text:      cssVar('--vscode-foreground', '#cccccc'),
@@ -851,7 +857,7 @@ export class GraphSideView {
         ctx.save();
         ctx.translate(s.x, s.y - r - 6);
         ctx.rotate(15 * Math.PI / 180);
-        ctx.font = (isActive ? 'bold ' : '') + '11px var(--vscode-font-family)';
+        ctx.font = (isActive ? 'bold ' : '') + T.labelSize + ' ' + T.font;
         ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
         // Centred background-coloured halo so the label stays readable where edges
         // cross behind it. Drawn as the text's own shadow (two passes to strengthen).
@@ -862,10 +868,10 @@ export class GraphSideView {
         ctx.shadowBlur = 5;
         ctx.restore();
       } else {
-        // Hover tooltip replaces the angled label (no double text).
-        ctx.font = 'bold 12px var(--vscode-font-family)';
+        // Hover tooltip replaces the angled label (no double text): editor size +2, bold.
+        ctx.font = 'bold ' + T.hoverSize + ' ' + T.font;
         const tw = ctx.measureText(n.name).width;
-        const bw = tw + 14, bh = 20, bx = s.x - bw / 2, by = s.y - r - 10 - bh;
+        const bh = parseFloat(T.hoverSize) + 8, bw = tw + 14, bx = s.x - bw / 2, by = s.y - r - 10 - bh;
         ctx.fillStyle = T.labelBg;
         ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 4); ctx.fill();
         ctx.strokeStyle = T.labelBdr; ctx.lineWidth = 0.8; ctx.stroke();
@@ -980,9 +986,13 @@ export class GraphSideView {
       }
       return fallback;
     }
-    function setActive(n) {
+    // Centering is the *last* step of a selection: during a build we only mark the node
+    // active (instant highlight) and let the camera glide in once, after the layout has
+    // settled (focusActive, fired on activeDone/buildDone). Centering on the node's
+    // seeded pre-layout spot here would just fight the layout tween that moves it next.
+    function setActive(n, center) {
       activeId = n.id;
-      animateToNode(n);
+      if (center !== false) { animateToNode(n); }
       updateStatus();
       scheduleSave();
     }
@@ -995,9 +1005,6 @@ export class GraphSideView {
       suppressTimer = setTimeout(() => { suppressActiveFor = null; suppressTimer = null; }, 600);
     }
     function requestBuild(uri) {
-      // First build from empty: show a brief "Preparing the graph" screen while the
-      // graph streams in underneath, then fade out to reveal it (~1s minimum).
-      if (nodeMap.size === 0) { setIntroMsg('Preparing the graph…'); showIntro(1000); }
       vscode.postMessage({ command: 'requestBuild', uri: uri });
     }
     // Live-patch the focus node's dependency ring after its file is saved: add newly
@@ -1047,13 +1054,24 @@ export class GraphSideView {
     }
     // ── message handling ───────────────────────────────────────────────────────
     window.addEventListener('message', ({ data: msg }) => {
-      if (msg.command === 'playIntro') { playIntro(); return; }
+      // The host polls the language server when a build comes back empty (cold start).
+      // While it does, hold the loading screen up; drop it once a real result arrives.
+      if (msg.command === 'buildLoading') {
+        buildLoadingLock = msg.loading;
+        if (msg.loading) { setIntroMsg('Waiting for the language server…'); showIntro(); }
+        else { hideIntro(); }
+        return;
+      }
       if (msg.command === 'languageReady') {
         languageReady = msg.ready;
+        // Only the genuine wait shows the loading screen: while the language server is
+        // still starting. Once it's ready the screen is dismissed (or replaced by the
+        // "open a file" prompt when nothing is on the map yet).
         if (!msg.ready) {
-          if (nodeMap.size === 0) { setIntroMsg('Loading language support…'); showIntro(true); }
+          if (nodeMap.size === 0) { setIntroMsg('Loading language support…'); showIntro(); }
         } else {
-          if (nodeMap.size === 0) { setIntroMsg('Open a file to explore its graph'); showIntro(true); }
+          if (nodeMap.size === 0) { setIntroMsg('Open a file to explore its graph'); showIntro(); }
+          else { hideIntro(); }
           if (pendingActive) { const u = pendingActive; pendingActive = null; focusFile(u); }
         }
         return;
@@ -1132,7 +1150,7 @@ export class GraphSideView {
         // fading, then the engine deletes it.
         prunePending = true; kickFade();
         updateStatus();
-        showProgress('Stabilizing the layout…');
+        showProgress('Re-evaluating the hierarchy…');
         hideProgress(700);
         scheduleLayout(focusActive);   // final layout + re-centre, deferred
         return;
@@ -1173,11 +1191,13 @@ export class GraphSideView {
           // space and fade out; whatever stays marked is deleted once the build ends.
           for (const n of nodeMap.values()) { if (n.tier !== 'shadow') { n.tier = 'inactive'; } n.expanded = false; n.stale = true; }
           revealed = new Set();
+          // A real node is about to render — dismiss the loading screen, unless the host
+          // is polling the LSP (cold start), where we keep it up until the result lands.
+          if (!buildLoadingLock) { hideIntro(); }
           kickFade();
         } else if (msg.seqId !== currentSeqId) {
           return;  // stale stage from a superseded build
         }
-        // The loading screen fades on its own timer; the graph streams in underneath.
         showProgress(progressFor(msg));
 
         if (msg.tier === 'active') {
@@ -1199,7 +1219,7 @@ export class GraphSideView {
             node.stale = false;   // rescued — fade engine eases it back to full
             node.expanded = true;
             buildRootId = node.id;
-            setActive(node);
+            setActive(node, false);   // centre last — after the layout settles (focusActive)
           } else {
             const root = nodeMap.get(buildRootId);
             if (!root) { return; }
@@ -1356,7 +1376,7 @@ export class GraphSideView {
           // Focus the node in the graph — pan instantly; promote it so it reads as
           // the focus during the glide, before the rebuild fills its neighbourhood.
           if (wasCentre) { animateToNode(hit); }
-          else { hit.tier = 'active'; hit.stale = false; kickFade(); setActive(hit); }
+          else { hit.tier = 'active'; hit.stale = false; kickFade(); setActive(hit, false); }
 
           // Open the file too: single click previews (italic tab, focus stays on the
           // graph) so you can keep clicking around; double click pins it and hands
@@ -1391,8 +1411,8 @@ export class GraphSideView {
     // initial paint of any restored map
     refreshTheme();
     handleResize();
-    if (nodeMap.size) { hideIntro(); updateStatus(); playIntro(); }
-    else { showIntro(true); }   // animated loading screen until languageReady/build resolves
+    if (nodeMap.size) { hideIntro(); updateStatus(); }
+    else { showIntro(); }   // loading screen until languageReady / first build resolves
     draw();
 
     vscode.postMessage({ command: 'ready' });
