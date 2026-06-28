@@ -19,7 +19,7 @@
   "version": "0.4.0",
   "publisher": "gsuleimanov",
   "license": "Apache-2.0",
-  "icon": "images/codenav-logo.png",
+  "icon": "images/alat-dependency-graph-icon-256x256.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/GSuleimanov/vscode-extension--codenav.git"
