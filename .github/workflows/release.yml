@@ -1,0 +1,91 @@
+name: Release
+
+# Publishes the extension to the VS Code Marketplace and Open VSX.
+#
+# Trigger: push a version tag, e.g.
+#   git tag v0.3.2 && git push origin v0.3.2
+#
+# The tag is the source of truth for the version. CI writes that version into
+# package.json, builds a single .vsix, publishes that same artifact to both
+# registries, and commits the version bump back to the default branch.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Needed so the final step can push the version-bump commit back to the branch.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Derive version from tag
+        id: ver
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$VERSION (tag: $GITHUB_REF_NAME)"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Set package.json version from tag
+        run: npm version "${{ steps.ver.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Type-check
+        run: npm run compile
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Package VSIX
+        run: npx --yes @vscode/vsce package -o "alat-dependency-graph-${{ steps.ver.outputs.version }}.vsix"
+
+      - name: Publish to VS Code Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx --yes @vscode/vsce publish --packagePath "alat-dependency-graph-${{ steps.ver.outputs.version }}.vsix" -p "$VSCE_PAT"
+
+      - name: Publish to Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: npx --yes ovsx publish "alat-dependency-graph-${{ steps.ver.outputs.version }}.vsix" -p "$OVSX_PAT"
+
+      - name: Attach VSIX to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "alat-dependency-graph-${{ steps.ver.outputs.version }}.vsix"
+
+      - name: Commit version bump back to default branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout "$DEFAULT_BRANCH"
+          npm version "${{ steps.ver.outputs.version }}" --no-git-tag-version --allow-same-version
+          if git diff --quiet -- package.json package-lock.json; then
+            echo "Version already in sync; nothing to commit."
+          else
+            git add package.json package-lock.json
+            git commit -m "release: v${{ steps.ver.outputs.version }} [skip ci]"
+            git push origin "HEAD:$DEFAULT_BRANCH"
+          fi
