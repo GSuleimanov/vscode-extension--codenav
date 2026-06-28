@@ -145,6 +145,18 @@ export class GraphSideView {
       this.panel = undefined;
     }, undefined, this.context.subscriptions);
 
+    // Live-apply node/text size changes without a reload.
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('alat.nodeSize') || e.affectsConfiguration('alat.textSize')) {
+        const cfg = vscode.workspace.getConfiguration('alat');
+        this.panel?.webview.postMessage({
+          command: 'config',
+          nodeSize: cfg.get<number>('nodeSize', 8),
+          textSize: cfg.get<number>('textSize', 12),
+        });
+      }
+    }, undefined, this.context.subscriptions);
+
     return panel;
   }
 
@@ -235,6 +247,9 @@ export class GraphSideView {
   }
 
   private getHtml(): string {
+    const cfg = vscode.workspace.getConfiguration('alat');
+    const nodeSize = cfg.get<number>('nodeSize', 8);
+    const textSize = cfg.get<number>('textSize', 12);
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -368,7 +383,15 @@ export class GraphSideView {
     // nodeMap: id -> { id,name,uri,line,kind,tags, x,y, expanded }
     let nodeMap = new Map();
     let edges   = [];                 // { from, to, kind }
-    let edgeKeys = new Set();         // 'from|to' — dedup directed pairs
+    let edgeMap = new Map();          // 'from|to' -> edge — dedup directed pairs, keyed for kind upgrades
+
+    // A directed pair can be described two ways: as a dependency (extends/implements/
+    // uses, from the source's parse) and as a caller link ('calls', from the target's
+    // reference scan). They're the same edge — keep the more specific structural kind so
+    // the relationship keyword is right regardless of which build observed it first.
+    function edgeRank(kind) {
+      return kind === 'extends' ? 4 : kind === 'implements' ? 3 : kind === 'uses' ? 2 : kind === 'calls' ? 1 : 0;
+    }
     let activeId = null;
     // Authoritative caller/dependency counts per node id, computed by the builder when
     // it expands a node (see tieredGraphBuilder). Sticky across rebuilds, so selecting a
@@ -390,10 +413,14 @@ export class GraphSideView {
     let suppressActiveFor = null;     // uri we just opened ourselves — ignore its echo
     let suppressTimer = null;
 
-    const X_GAP = 205, LEVEL_Y = 210, MIN_DIST = 96, NODE_R = 8;
+    const X_GAP = 205, LEVEL_Y = 210, MIN_DIST = 96;
+    // Configurable via settings (alat.nodeSize / alat.textSize); live-patched by the
+    // 'config' message. let, not const, so changes apply without a reload.
+    let NODE_R = ${nodeSize};
+    let LABEL_PT = ${textSize};
 
     // Node radius scales with how many connections a class has (degree). NODE_R is
-    // the base (half the old fixed 16); well-connected classes grow up to +18.
+    // the base; well-connected classes grow up to +18.
     let nodeDeg = new Map();
     // Degrees only change when the edge set changes, so recompute lazily on a dirty
     // flag instead of on every frame (draw runs many times per second during tweens).
@@ -422,7 +449,7 @@ export class GraphSideView {
           nodeMap.set(n.id, n);
         }
         edges = Array.isArray(s.edges) ? s.edges : [];
-        for (const e of edges) { edgeKeys.add(e.from + '|' + e.to); }
+        for (const e of edges) { edgeMap.set(e.from + '|' + e.to, e); }
         activeId = s.activeId || null;
         if (s.view) { view = s.view; }
       }
@@ -462,21 +489,18 @@ export class GraphSideView {
     let T = {};
     function refreshTheme() {
       // Resolve the UI font stack to a concrete family — canvas ctx.font can't take a
-      // CSS var() — and the editor's own font size, so node labels match editor text.
-      // The hover label uses the same family two points larger and bold.
-      const editorFontSize = parseFloat(cssVar('--vscode-editor-font-size', '13')) || 13;
+      // CSS var(). Label size comes from settings (LABEL_PT), not the editor font.
       T = {
         font:      cssVar('--vscode-font-family', 'sans-serif'),
-        labelSize: editorFontSize + 'px',
-        hoverSize: (editorFontSize + 2) + 'px',
+        labelSize: LABEL_PT + 'px',
+        kwSize:    Math.max(LABEL_PT - 2, 7) + 'px',   // relation-marker line: 2px smaller
         fill:      cssVar('--vscode-button-background', '#0e639c'),
         fillFocus: cssVar('--vscode-charts-green', '#4ec9b0'),
+        fillTest:  cssVar('--vscode-charts-orange', '#d18616'),
         text:      cssVar('--vscode-foreground', '#cccccc'),
         bg:        cssVar('--vscode-editor-background', '#1e1e1e'),
         glyphText: cssVar('--vscode-button-foreground', '#ffffff'),
         border:    cssVar('--vscode-panel-border', '#80808060'),
-        labelBg:   cssVar('--vscode-editorHoverWidget-background', '#252526'),
-        labelBdr:  cssVar('--vscode-editorHoverWidget-border', '#454545'),
         edge: {
           extends:    cssVar('--vscode-charts-green',  '#4ec9b0'),
           implements: cssVar('--vscode-charts-purple', '#c586c0'),
@@ -522,7 +546,14 @@ export class GraphSideView {
     }
     function addEdge(e) {
       const k = e.from + '|' + e.to;
-      if (!edgeKeys.has(k)) { edgeKeys.add(k); edges.push(e); markEdgesChanged(); }
+      const ex = edgeMap.get(k);
+      if (ex) {
+        // Same pair already known — upgrade to the more specific relationship kind
+        // (e.g. promote a 'calls' edge to 'implements' so its keyword is correct).
+        if (edgeRank(e.kind) > edgeRank(ex.kind)) { ex.kind = e.kind; markEdgesChanged(); }
+        return;
+      }
+      edgeMap.set(k, e); edges.push(e); markEdgesChanged();
     }
 
     // ── layered (Sugiyama-style) layout ────────────────────────────────────────
@@ -769,7 +800,7 @@ export class GraphSideView {
       }
       if (removed) {
         edges = edges.filter(e => nodeMap.has(e.from) && nodeMap.has(e.to));
-        edgeKeys = new Set(edges.map(e => e.from + '|' + e.to));
+        edgeMap = new Map(edges.map(e => [e.from + '|' + e.to, e]));
         markEdgesChanged();
       }
       draw();
@@ -806,6 +837,45 @@ export class GraphSideView {
       if (n) { animateToNode(n); }
     }
 
+    // Pan + zoom together toward a target view (used by fit-to-active).
+    function animateToView(tv, dur) {
+      const sx = view.x, sy = view.y, ss = view.scale;
+      const start = performance.now();
+      anim = start;
+      function step(now) {
+        if (anim !== start) { return; }
+        const t = Math.min(1, (now - start) / (dur || 420));
+        const e = 1 - Math.pow(1 - t, 3);
+        view.x = sx + (tv.x - sx) * e;
+        view.y = sy + (tv.y - sy) * e;
+        view.scale = ss + (tv.scale - ss) * e;
+        draw();
+        if (t < 1) { requestAnimationFrame(step); } else { anim = null; scheduleSave(); }
+      }
+      requestAnimationFrame(step);
+    }
+
+    // Fit the selected node + its active ring (the opaque, directly-relevant set) into
+    // the viewport. Runs once at the end of a build. Aims at layout targets (tgx/tgy)
+    // so the camera lands where nodes are settling, not where they momentarily are.
+    function fitActive() {
+      const nodes = [...nodeMap.values()].filter(n => n.id === activeId || n.tier === 'active');
+      if (nodes.length < 2) { focusActive(); return; }   // nothing to frame — just centre
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const n of nodes) {
+        const gx = n.tgx != null ? n.tgx : n.x, gy = n.tgy != null ? n.tgy : n.y;
+        const pad = radiusOf(n) + 26;   // node + a little label allowance, in world units
+        minX = Math.min(minX, gx - pad); maxX = Math.max(maxX, gx + pad);
+        minY = Math.min(minY, gy - pad); maxY = Math.max(maxY, gy + pad);
+      }
+      const bw = Math.max(1, maxX - minX), bh = Math.max(1, maxY - minY);
+      // Use ~84% of the viewport so labels (which extend above nodes) stay on-screen.
+      let scale = Math.min(viewW / bw, viewH / bh) * 0.84;
+      scale = Math.max(0.25, Math.min(scale, 1.4));   // don't over-zoom a tiny graph
+      const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+      animateToView({ x: viewW / 2 - cx * scale, y: viewH / 2 - cy * scale, scale }, 520);
+    }
+
     // ── drawing ────────────────────────────────────────────────────────────────
     function toScreen(n) { return { x: n.x * view.scale + view.x, y: n.y * view.scale + view.y }; }
 
@@ -819,7 +889,8 @@ export class GraphSideView {
       return null;
     }
 
-    function drawNode(n) {
+    // Shared per-node geometry/alpha, so the body pass and the label pass agree.
+    function nodeVisual(n) {
       const s = toScreen(n);
       const isHover  = n === hoverNode;
       // Hover switches context: the hovered node becomes the active focus and its
@@ -831,6 +902,17 @@ export class GraphSideView {
       const fade = n.fade != null ? n.fade : 1;   // <1 while a removed node dissolves
       const tierAlpha = n.tier === 'inactive' ? 0.20 : 1.0;
       const baseAlpha = (hoverNode ? (inContext ? 1.0 : 0.12) : tierAlpha) * fade;
+      return { s, isHover, isActive, r, baseAlpha };
+    }
+
+    // Interfaces and abstract classes render as a donut (open centre) to read as
+    // "not a concrete type" at a glance.
+    function isDonut(n) {
+      return n.kind === 'interface' || (n.tags || []).includes('abstract');
+    }
+
+    function drawNodeBody(n) {
+      const { s, isHover, isActive, r, baseAlpha } = nodeVisual(n);
       ctx.globalAlpha = baseAlpha;
 
       if (isHover) {
@@ -838,47 +920,77 @@ export class GraphSideView {
         ctx.fillStyle = T.fill; ctx.globalAlpha = 0.18 * baseAlpha; ctx.fill(); ctx.globalAlpha = baseAlpha;
       }
 
-      ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
-      ctx.fillStyle   = isActive ? T.fillFocus : T.fill;
-      ctx.strokeStyle = isHover ? T.text : T.border;
-      ctx.lineWidth   = (isActive || isHover) ? 2 : 0.8;
-      ctx.fill(); ctx.stroke();
+      const donut = isDonut(n);
+      const isTest = (n.tags || []).includes('test');
+      const fillCol   = isActive ? T.fillFocus : (isTest ? T.fillTest : T.fill);
+      const strokeCol = isHover ? T.text : T.border;
+      if (donut) {
+        const hole = r * 0.46;   // thicker ring wall reads bolder
+        // Fill the ring via even-odd (both arcs same direction → clean hole). The
+        // outlines are stroked as separate closed circles so there's no seam/gap
+        // where a single combined path would join the two arcs.
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+        ctx.arc(s.x, s.y, hole, 0, Math.PI * 2);
+        ctx.fillStyle = fillCol;
+        ctx.fill('evenodd');
+        ctx.strokeStyle = strokeCol;
+        ctx.lineWidth = (isActive || isHover) ? 2.2 : 1.4;   // bolder than the 0.8 disc default
+        ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(s.x, s.y, hole, 0, Math.PI * 2); ctx.stroke();
+      } else {
+        ctx.beginPath(); ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+        ctx.fillStyle   = fillCol;
+        ctx.strokeStyle = strokeCol;
+        ctx.lineWidth   = (isActive || isHover) ? 2 : 0.8;
+        ctx.fill(); ctx.stroke();
+      }
 
       const glyph = glyphFor(n);
-      if (glyph) {
+      if (glyph && !donut) {   // skip the glyph in the hole so the donut stays clean
         ctx.fillStyle = T.glyphText;
         ctx.font = 'bold ' + Math.round(r * 1.1) + 'px var(--vscode-font-family)';
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         ctx.fillText(glyph, s.x, s.y);
       }
+      ctx.globalAlpha = 1;
+    }
 
-      if (!isHover) {
-        // Label angled 15° to reduce horizontal overlap between neighbours.
-        ctx.save();
-        ctx.translate(s.x, s.y - r - 6);
-        ctx.rotate(15 * Math.PI / 180);
-        ctx.font = (isActive ? 'bold ' : '') + T.labelSize + ' ' + T.font;
-        ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-        // Centred background-coloured halo so the label stays readable where edges
-        // cross behind it. Drawn as the text's own shadow (two passes to strengthen).
+    // Labels are drawn in a separate pass after every node body, so they always sit
+    // above all nodes. Style is uniform — no size/weight change on hover; the truly
+    // selected node (when nothing is hovered) is the only one bolded.
+    function drawLabel(n) {
+      const { s, isActive, r, baseAlpha } = nodeVisual(n);
+      ctx.globalAlpha = baseAlpha;
+      // Dependency/sibling nodes get a relationship keyword as a dimmer first line;
+      // callers and the centre show only the name.
+      const kind = labelKindMap.get(n.id);
+      const bold = isActive ? 'bold ' : '';   // focus node (selected or hovered) is bold
+      const lh = parseFloat(T.labelSize) * 1.05;
+      // Angled 15° to reduce horizontal overlap between neighbours.
+      ctx.save();
+      ctx.translate(s.x, s.y - r - 6);
+      ctx.rotate(15 * Math.PI / 180);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+      // Centred background-coloured halo so the label stays readable where edges
+      // cross behind it. Drawn as the text's own shadow (two passes to strengthen).
+      ctx.shadowColor = T.bg; ctx.shadowBlur = 10; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+      // First line: the relationship marker — 2px smaller and 25% more transparent.
+      if (kind) {
+        ctx.globalAlpha = baseAlpha * 0.60;
+        ctx.font = T.kwSize + ' ' + T.font;
         ctx.fillStyle = T.text;
-        ctx.shadowColor = T.bg; ctx.shadowBlur = 10; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
-        ctx.fillText(n.name, 0, 0);
-        ctx.fillText(n.name, 0, 0);
-        ctx.shadowBlur = 5;
-        ctx.restore();
-      } else {
-        // Hover tooltip replaces the angled label (no double text): editor size +2, bold.
-        ctx.font = 'bold ' + T.hoverSize + ' ' + T.font;
-        const tw = ctx.measureText(n.name).width;
-        const bh = parseFloat(T.hoverSize) + 8, bw = tw + 14, bx = s.x - bw / 2, by = s.y - r - 10 - bh;
-        ctx.fillStyle = T.labelBg;
-        ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 4); ctx.fill();
-        ctx.strokeStyle = T.labelBdr; ctx.lineWidth = 0.8; ctx.stroke();
-        ctx.fillStyle = T.text; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillText(n.name, s.x, by + bh / 2);
-        ctx.textBaseline = 'alphabetic';
+        ctx.fillText(kind, 0, -lh);
+        ctx.fillText(kind, 0, -lh);
+        ctx.globalAlpha = baseAlpha;
       }
+      // Second line: the class name (current style).
+      ctx.font = bold + T.labelSize + ' ' + T.font;
+      ctx.fillStyle = T.text;
+      ctx.fillText(n.name, 0, 0);
+      ctx.fillText(n.name, 0, 0);
+      ctx.shadowBlur = 0;
+      ctx.restore();
       ctx.globalAlpha = 1;
     }
 
@@ -891,9 +1003,9 @@ export class GraphSideView {
       const a = nodeMap.get(e.from), b = nodeMap.get(e.to);
       if (!a || !b) { return; }
       const A = toScreen(a), B = toScreen(b);
-      // While hovering, the hovered node's connections are highlighted in blue to
-      // signal the switched context; otherwise edges keep their relationship colour.
-      const hi = viaHover ? T.edge.uses : (T.edge[e.kind] || T.edge.uses);
+      // Edges always keep their relationship colour (extends/implements/uses). Hovering
+      // only emphasises the focus node's connections via a thicker, more opaque line.
+      const hi = T.edge[e.kind] || T.edge.uses;
       ctx.strokeStyle = hi;
       ctx.fillStyle   = hi;
       ctx.lineWidth   = viaHover ? 1.7 : 1.2;
@@ -937,6 +1049,7 @@ export class GraphSideView {
       // otherwise the selected node. Hovering another element reveals only its
       // connections (including its shadow +2-deep neighbours) and hides the rest.
       const focusId = hoverNode ? hoverNode.id : activeId;
+      labelKindMap = computeLabelKinds();
       for (const e of edges) {
         if (e.from !== focusId && e.to !== focusId) { continue; }
         const a = nodeMap.get(e.from), b = nodeMap.get(e.to);
@@ -949,7 +1062,32 @@ export class GraphSideView {
       const drawable = [...nodeMap.values()].filter(n => n.tier !== 'shadow' || (n.fade ?? 0) > 0.01);
       const ordered = drawable.sort((a, b) => (a.id === activeId ? 1 : 0) - (b.id === activeId ? 1 : 0));
       const withHover = hoverNode ? [...ordered.filter(n => n !== hoverNode), hoverNode] : ordered;
-      withHover.forEach(drawNode);
+      // Two passes: all node bodies first, then all labels — so every label sits
+      // above every node (labels have the highest z-index).
+      withHover.forEach(drawNodeBody);
+      withHover.forEach(drawLabel);
+    }
+
+    // Relationship of each node to the current focus (hovered node, else the selected
+    // centre), used as the label's first line. Downward dependencies read in the active
+    // voice (extends/implements/uses X); upward callers read in the passive voice
+    // (extended by / implemented by / used by X). The centre itself gets no marker.
+    let labelKindMap = new Map();
+    const PASSIVE = { extends: 'extended by', implements: 'implemented by', uses: 'used by', calls: 'used by' };
+    function computeLabelKinds() {
+      const m = new Map();
+      const ref = hoverNode ? hoverNode.id : activeId;
+      if (!ref) { return m; }
+      for (const e of edges) {
+        if (e.from === ref) {
+          // focus → X : focus depends on X (downward)
+          m.set(e.to, e.kind === 'calls' ? 'uses' : e.kind);
+        } else if (e.to === ref) {
+          // X → focus : X depends on focus (upward caller) — inverse phrasing
+          m.set(e.from, PASSIVE[e.kind] || 'used by');
+        }
+      }
+      return m;
     }
 
     function updateStatus() {
@@ -1016,7 +1154,7 @@ export class GraphSideView {
       // Remove dependency edges (root→X) that no longer exist.
       const dropped = [];
       edges = edges.filter(e => {
-        if (e.from === root.id && !newTargets.has(e.to)) { edgeKeys.delete(e.from + '|' + e.to); dropped.push(e.to); return false; }
+        if (e.from === root.id && !newTargets.has(e.to)) { edgeMap.delete(e.from + '|' + e.to); dropped.push(e.to); return false; }
         return true;
       });
       markEdgesChanged();
@@ -1074,6 +1212,15 @@ export class GraphSideView {
           else { hideIntro(); }
           if (pendingActive) { const u = pendingActive; pendingActive = null; focusFile(u); }
         }
+        return;
+      }
+
+      // Settings changed (alat.nodeSize / alat.textSize) — apply live, no reload.
+      if (msg.command === 'config') {
+        if (typeof msg.nodeSize === 'number') { NODE_R = msg.nodeSize; }
+        if (typeof msg.textSize === 'number') { LABEL_PT = msg.textSize; }
+        refreshTheme();
+        draw();
         return;
       }
 
@@ -1152,7 +1299,7 @@ export class GraphSideView {
         updateStatus();
         showProgress('Re-evaluating the hierarchy…');
         hideProgress(700);
-        scheduleLayout(focusActive);   // final layout + re-centre, deferred
+        scheduleLayout(fitActive);   // final layout, then zoom-to-fit the active set
         return;
       }
 
@@ -1220,10 +1367,21 @@ export class GraphSideView {
             node.expanded = true;
             buildRootId = node.id;
             setActive(node, false);   // centre last — after the layout settles (focusActive)
+          } else if (msg.stage === 'siblings') {
+            // Siblings are loose context (no edge to the selected node): keep them dimmed
+            // (inactive) rather than promoting them to the active ring.
+            const root = nodeMap.get(buildRootId);
+            if (!root) { return; }
+            for (const n of (msg.nodes || [])) {
+              const ex = nodeMap.get(n.id);
+              if (ex) { ex.stale = false; }   // keep alive, but don't raise its tier
+            }
+            placeGroup(root, (msg.nodes || []).filter(n => !nodeMap.has(n.id)), 0, 'inactive');
+            for (const e of (msg.edges || [])) { addEdge(e); }
           } else {
             const root = nodeMap.get(buildRootId);
             if (!root) { return; }
-            const dirY = msg.stage === 'callers' ? -LEVEL_Y : msg.stage === 'dependencies' ? LEVEL_Y : 0;
+            const dirY = msg.stage === 'callers' ? -LEVEL_Y : LEVEL_Y;
             // Upgrade existing nodes and place any new ones.
             for (const n of (msg.nodes || [])) {
               const ex = nodeMap.get(n.id);

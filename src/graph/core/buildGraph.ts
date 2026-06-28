@@ -8,7 +8,7 @@ const TEST_PATH = /\/(test|tests|it|integration-test)\//i;
 const TEST_FILE = /(Test|Tests|TestCase|Spec|IT)\.[A-Za-z0-9]+$/;
 const TEST_PREFIX = /(^|\/)test_[\w]+\.[A-Za-z0-9]+$/;
 
-function isTestUri(uri: string): boolean {
+export function isTestUri(uri: string): boolean {
   return TEST_PATH.test(uri) || TEST_FILE.test(uri) || TEST_PREFIX.test(uri);
 }
 

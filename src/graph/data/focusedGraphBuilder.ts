@@ -16,9 +16,10 @@
 // (callers + siblings) on the workspace epoch (bumped on any save).
 
 import * as vscode from 'vscode';
-import { parseSingleFile, readFileText } from './singleFileParser';
+import { parseSingleFile, readFileText, commentRangesForFile, CommentRange } from './singleFileParser';
 import { FocusedGraphNode, FocusedGraphEdge, StageCallback } from './focusedGraphTypes';
 import { ParsedType } from '../core/types';
+import { isTestUri } from '../core/buildGraph';
 import {
   Segment, ParentRef, currentEpoch, getExpansion, setExpansion, hashText,
 } from './expansionCache';
@@ -32,15 +33,29 @@ function nodeId(uri: string, line: number): string {
 }
 
 function toNode(p: ParsedType, uri: string, role: FocusedGraphNode['role']): FocusedGraphNode {
+  // The cross-cutting `test` tag is path/name based (same rule buildGraph applies),
+  // added here too so the webview can colour test classes on the focused build path.
+  const tags = p.tags ?? [];
+  const withTest = isTestUri(uri) && !tags.includes('test') ? [...tags, 'test'] : tags;
   return {
     id: nodeId(uri, p.line),
     name: p.name,
     uri,
     line: p.line,
     kind: p.kind,
-    tags: p.tags ?? [],
+    tags: withTest,
     role,
   };
+}
+
+/** Whether a position falls within any of the given comment ranges (inclusive). */
+function positionInComment(pos: vscode.Position, comments: CommentRange[]): boolean {
+  for (const c of comments) {
+    const afterStart = pos.line > c.startLine || (pos.line === c.startLine && pos.character >= c.startCol);
+    const beforeEnd = pos.line < c.endLine || (pos.line === c.endLine && pos.character <= c.endCol);
+    if (afterStart && beforeEnd) { return true; }
+  }
+  return false;
 }
 
 function isWorkspace(uri: vscode.Uri): boolean {
@@ -203,11 +218,24 @@ async function computeCallers(
   // that ambiguity (genuinely-uncalled vs. server-not-ready) rather than this function.
   const refsNonEmpty = refs.length > 0;
 
-  const refUriStrings = [...new Set(
-    refs
-      .filter(r => isWorkspace(r.uri) && r.uri.toString() !== uriStr)
-      .map(r => r.uri.toString())
-  )];
+  // Group workspace references by file, then drop any file whose only references to
+  // the centre sit inside comments — a class mentioned in a comment is not a caller.
+  const refsByFile = new Map<string, vscode.Location[]>();
+  for (const r of refs) {
+    if (!isWorkspace(r.uri) || r.uri.toString() === uriStr) { continue; }
+    const key = r.uri.toString();
+    const list = refsByFile.get(key) ?? [];
+    list.push(r);
+    refsByFile.set(key, list);
+  }
+
+  const refUriStrings = (await Promise.all(
+    [...refsByFile].map(async ([fileUri, locs]) => {
+      const comments = await commentRangesForFile(vscode.Uri.parse(fileUri));
+      const hasCodeRef = locs.some(l => !positionInComment(l.range.start, comments));
+      return hasCodeRef ? fileUri : null;
+    })
+  )).filter((u): u is string => u !== null);
 
   const callerResolutions = await Promise.all(
     refUriStrings.map(async (callerUriStr) => {
@@ -233,7 +261,8 @@ async function computeCallers(
 
 /**
  * Extrinsic: sibling implementations of the centre's parent class (no edges — they
- * are shown as loose context). Empty when the centre has no resolved `extends`.
+ * are loose context, shown dimmed/inactive since they don't connect to the centre).
+ * Empty when the centre has no resolved `extends`.
  */
 async function computeSiblings(
   uriStr: string, parent: ParentRef | null, center: FocusedGraphNode

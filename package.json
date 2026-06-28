@@ -48,7 +48,26 @@
         "category": "Alat",
         "icon": "$(circuit-board)"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Alat / Dependency Graph",
+      "properties": {
+        "alat.nodeSize": {
+          "type": "number",
+          "default": 8,
+          "minimum": 2,
+          "maximum": 40,
+          "markdownDescription": "Base radius (in px) of graph nodes. Well-connected classes grow above this based on their degree."
+        },
+        "alat.textSize": {
+          "type": "number",
+          "default": 12,
+          "minimum": 6,
+          "maximum": 32,
+          "markdownDescription": "Font size (in px) of node labels."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run build",

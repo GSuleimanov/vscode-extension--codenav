@@ -119,9 +119,13 @@ export async function buildTieredGraph(opts: TieredBuildOptions): Promise<Tiered
         expandedId = tn.id;
         if (uri === centerUri) { graph.selectedId = tn.id; }
       } else {
+        // Siblings are loose context — they have no edge to the selected node, so they
+        // aren't promoted to the active ring or expanded; they stay dimmed (inactive),
+        // unless some other stage already linked them in at a higher tier.
+        const isSiblings = update.stage === 'siblings';
         for (const n of update.nodes) {
-          upsert(n, tier);
-          if (!seen.has(n.uri)) { seen.add(n.uri); nextRing.push(n.uri); }
+          upsert(n, isSiblings ? 'inactive' : tier);
+          if (!isSiblings && !seen.has(n.uri)) { seen.add(n.uri); nextRing.push(n.uri); }
         }
         for (const e of update.edges) { addEdge(e); }
       }
