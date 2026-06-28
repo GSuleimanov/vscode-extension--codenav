@@ -3,7 +3,7 @@
 How Alat positions classes in the Project Graph — and the established
 computer-science it is built on.
 
-## What it is, scientifically
+## What it is
 
 The Project Graph uses **layered graph drawing** (a.k.a. **hierarchical graph
 drawing**), the classic technique introduced by **Sugiyama, Tagawa & Toda
@@ -46,14 +46,6 @@ several iterations.
 node toward the average x of its neighbours, then enforce a minimum per-row gap.
 Alat makes this **tier-aware** — the active subgraph is packed tight and
 centred, faded context nodes fan out to the sides.
-
-## One-line pitch
-
-> Alat lays out the dependency graph with a **Sugiyama-style layered
-> algorithm**: it breaks cycles into a DAG, assigns each class a **layer via
-> longest-path ranking** (so layout depth reflects true dependency depth),
-> minimizes crossings with the **median heuristic**, and places coordinates with
-> a tier-aware barycenter pass that keeps the selected element centred.
 
 ## Where it lives in the code
 
